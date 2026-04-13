@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import importlib
 from io import BytesIO
 from tkinter import filedialog, messagebox, ttk
 
@@ -178,12 +179,33 @@ class UniversalVideoDownloader:
 
     def _verify_dependencies(self):
         try:
-            import yt_dlp  # noqa: F401
-        except ImportError:
+            importlib.import_module("yt_dlp")
+        except ModuleNotFoundError as exc:
+            self.root.withdraw()
+            if getattr(sys, "frozen", False):
+                message = (
+                    "Bundled yt-dlp is missing from this build.\n\n"
+                    "Rebuild after installing requirements in the build environment:\n"
+                    "  python -m pip install -r requirements.txt"
+                )
+            else:
+                message = (
+                    "yt-dlp is not installed for this Python environment.\n\n"
+                    "Run:\n"
+                    "  python -m pip install -r requirements.txt"
+                )
+            if getattr(exc, "name", None) not in (None, "yt_dlp"):
+                message += f"\n\nImport error: {exc}"
+            messagebox.showerror("Missing Dependency", message)
+            raise SystemExit(1)
+        except Exception as exc:
             self.root.withdraw()
             messagebox.showerror(
-                "Missing Dependency",
-                "yt-dlp is not installed.\n\nRun:\n  pip install yt-dlp",
+                "Dependency Error",
+                "yt-dlp failed to load in this environment.\n\n"
+                f"Details: {exc}\n\n"
+                "Try:\n"
+                "  python -m pip install -r requirements.txt",
             )
             raise SystemExit(1)
 
@@ -1024,8 +1046,10 @@ class UniversalVideoDownloader:
 
         thumbnail_url = self._resolve_thumbnail_url(info, is_playlist)
 
+        page_url = info.get("webpage_url") or info.get("original_url") or info.get("url")
+
         if thumbnail_url:
-            self._load_thumbnail(thumbnail_url)
+            self._load_thumbnail(thumbnail_url, page_url=page_url)
         else:
             self.thumbnail_label.config(text="No thumbnail", image="")
 
@@ -1155,9 +1179,12 @@ class UniversalVideoDownloader:
             return None
         return None
 
-    def _load_thumbnail(self, url):
+    def _load_thumbnail(self, url, page_url=None):
         try:
-            request = urllib.request.Request(url, headers=THUMBNAIL_HEADERS)
+            headers = dict(THUMBNAIL_HEADERS)
+            if page_url:
+                headers["Referer"] = page_url
+            request = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(request, timeout=8) as response:
                 img_data = response.read()
             img = Image.open(BytesIO(img_data))

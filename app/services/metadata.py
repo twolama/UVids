@@ -1,5 +1,7 @@
 import os
+import re
 import shutil
+import urllib.request
 from typing import Any, cast
 
 
@@ -15,6 +17,17 @@ class _YTDLPLogger:
 
     def error(self, msg):
         pass
+
+
+WEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 def _metadata_cookie_opts():
@@ -60,34 +73,96 @@ def _metadata_js_runtime_opts():
     return runtimes
 
 
+def _extract_html_preview(url):
+    request = urllib.request.Request(
+        url,
+        headers={
+            **WEB_HEADERS,
+            "Referer": url,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        html = response.read().decode("utf-8", errors="ignore")
+
+    def pick(patterns):
+        for pattern in patterns:
+            match = re.search(pattern, html, re.I | re.S)
+            if match:
+                value = match.group(1).strip()
+                if value:
+                    return value
+        return None
+
+    title = pick(
+        [
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<title[^>]*>([^<]+)</title>',
+        ]
+    )
+    thumbnail = pick(
+        [
+            r'<meta[^>]+property=["\']og:image(?:[:\w-]*)?["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']twitter:image(?:[:\w-]*)?["\'][^>]+content=["\']([^"\']+)["\']',
+        ]
+    )
+    description = pick(
+        [
+            r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+        ]
+    )
+
+    if title or thumbnail or description:
+        return {
+            "title": title or url,
+            "thumbnail": thumbnail,
+            "thumbnails": [{"url": thumbnail}] if thumbnail else [],
+            "description": description,
+            "webpage_url": url,
+            "original_url": url,
+            "url": url,
+            "extractor": "webpage",
+        }
+    return None
+
+
 def fetch_metadata(url):
     try:
         from yt_dlp import YoutubeDL
     except ImportError as exc:
-        raise RuntimeError("yt-dlp is not installed") from exc
+        raise RuntimeError(f"yt-dlp is not available: {exc}") from exc
 
     ydl_opts: dict[str, Any] = {
         "logger": _YTDLPLogger(),
         "quiet": True,
         "no_warnings": True,
         "no_color": True,
-        "extract_flat": "in_playlist",
-        "ignoreerrors": True,
+        "ignoreerrors": False,
         "socket_timeout": 25,
         "retries": 5,
         "extractor_retries": 3,
         "source_address": "0.0.0.0",
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            )
+            **WEB_HEADERS,
+            "Referer": url,
         },
     }
     js_runtimes = _metadata_js_runtime_opts()
     if js_runtimes:
         ydl_opts["js_runtimes"] = js_runtimes
     ydl_opts.update(_metadata_cookie_opts())
-    with YoutubeDL(cast(Any, ydl_opts)) as ydl:
-        return ydl.extract_info(url, download=False)
+
+    try:
+        with YoutubeDL(cast(Any, ydl_opts)) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info:
+                return info
+    except Exception:
+        pass
+
+    fallback = _extract_html_preview(url)
+    if fallback:
+        return fallback
+
+    raise RuntimeError("No metadata returned for URL")

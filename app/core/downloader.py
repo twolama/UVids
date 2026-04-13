@@ -331,7 +331,7 @@ def run_download(url, ydl_opts, max_network_attempts=None, debug=False):
     try:
         from yt_dlp import YoutubeDL
     except ImportError as exc:
-        raise RuntimeError("yt-dlp is not installed") from exc
+        raise RuntimeError(f"yt-dlp is not available: {exc}") from exc
 
     if max_network_attempts is None:
         max_network_attempts = int(

@@ -8,7 +8,9 @@ venv/
 build/
 dist/
 *.spec
+!uvids.spec
 
+.venlin/
 
 .venv/
 venv/
