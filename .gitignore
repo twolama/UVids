@@ -14,3 +14,7 @@ dist/
 venv/
 .env
 __pycache__/
+
+# Runtime binary assets should not be versioned
+app/assets/ffmpeg/
+*.exe
