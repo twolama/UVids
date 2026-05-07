@@ -11,6 +11,7 @@ dist/
 !uvids.spec
 
 .venlin/
+.venvwin/
 
 .venv/
 venv/

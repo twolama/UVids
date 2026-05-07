@@ -153,6 +153,7 @@ class UniversalVideoDownloader:
         self.current_video_size = 0
         self.last_percent = 0
         self.last_download_folder = None
+        self._shutdown_in_progress = False
 
         self.ffmpeg_path = get_ffmpeg_path()
         self.ffmpeg_dir = get_ffmpeg_dir()
@@ -176,6 +177,8 @@ class UniversalVideoDownloader:
         self._verify_dependencies()
         self.create_ui()
         self.setup_url_trace()
+        self.root.after(1500, self.check_for_updates_on_launch)
+        self.root.protocol("WM_DELETE_WINDOW", self.request_close)
 
     def _verify_dependencies(self):
         try:
@@ -345,6 +348,7 @@ class UniversalVideoDownloader:
         self.url_entry = ttk.Entry(top_frame, textvariable=self.url_var, width=60)
         self.url_entry.grid(row=0, column=1, sticky="ew", padx=5, ipady=4)
         self._apply_entry_cursor_theme(self.url_entry)
+        self._setup_linux_paste_support(self.url_entry)
         self.load_btn = create_modern_button(
             top_frame,
             text="Load Info",
@@ -455,7 +459,7 @@ class UniversalVideoDownloader:
         self.exit_btn = create_modern_button(
             btn_frame,
             text="EXIT",
-            command=self.root.quit,
+            command=self.request_close,
             bg=self.colors["neutral_button"],
             hover=self.colors["neutral_button_hover"],
             fg="white",
@@ -544,7 +548,7 @@ class UniversalVideoDownloader:
 
         self.file_menu.add_command(label="Load Info", command=self.fetch_info_manual)
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Exit", command=self.root.quit)
+        self.file_menu.add_command(label="Exit", command=self.request_close)
 
         self.download_menu.add_command(label="Start Download", command=self.start_download)
         self.download_menu.add_command(label="Cancel Current", command=self.cancel_download_action)
@@ -623,42 +627,56 @@ class UniversalVideoDownloader:
         self.apply_theme(self.menu_theme_var.get(), persist=True)
 
     def check_for_updates(self):
-        self._start_update_flow(auto_update=False)
+        self._start_update_flow(auto_update=False, show_current_status=True, show_errors=True)
 
     def update_now(self):
-        self._start_update_flow(auto_update=True)
+        self._start_update_flow(auto_update=True, show_current_status=True, show_errors=True)
 
-    def _start_update_flow(self, auto_update=False):
+    def check_for_updates_on_launch(self):
+        if self._shutdown_in_progress:
+            return
+        self._start_update_flow(auto_update=False, show_current_status=False, show_errors=False)
+
+    def _start_update_flow(self, auto_update=False, show_current_status=True, show_errors=True):
         if self.update_in_progress:
-            messagebox.showinfo("Update", "An update check is already in progress.")
+            if show_errors:
+                messagebox.showinfo("Update", "An update check is already in progress.")
             return
 
         self.update_in_progress = True
-        self.status_label.config(text="Checking for updates...", foreground=self.colors["accent"])
+        if show_current_status:
+            self.status_label.config(text="Checking for updates...", foreground=self.colors["accent"])
         threading.Thread(
             target=self._check_updates_worker,
-            args=(auto_update,),
+            args=(auto_update, show_current_status, show_errors),
             daemon=True,
         ).start()
 
-    def _check_updates_worker(self, auto_update):
+    def _check_updates_worker(self, auto_update, show_current_status, show_errors):
         result = check_latest_release(__version__)
-        self.root.after(0, lambda: self._handle_update_check_result(result, auto_update))
+        self._safe_after(
+            0,
+            lambda: self._handle_update_check_result(result, auto_update, show_current_status, show_errors),
+        )
 
-    def _handle_update_check_result(self, result, auto_update):
+    def _handle_update_check_result(self, result, auto_update, show_current_status, show_errors):
         if not result.get("ok"):
             self.update_in_progress = False
-            self.status_label.config(text="Ready", foreground=self.colors["accent"])
-            messagebox.showerror("Update", result.get("message", "Update check failed."))
+            if show_current_status:
+                self.status_label.config(text="Ready", foreground=self.colors["accent"])
+            if show_errors:
+                messagebox.showerror("Update", result.get("message", "Update check failed."))
             return
 
         if not result.get("update_available"):
             self.update_in_progress = False
-            self.status_label.config(text="Ready", foreground=self.colors["accent"])
-            messagebox.showinfo(
-                "Update",
-                f"You are up to date (v{result.get('current_version', __version__)}).",
-            )
+            if show_current_status:
+                self.status_label.config(text="Ready", foreground=self.colors["accent"])
+            if show_errors:
+                messagebox.showinfo(
+                    "Update",
+                    f"You are up to date (v{result.get('current_version', __version__)}).",
+                )
             return
 
         latest_version = result.get("latest_version", "latest")
@@ -668,10 +686,12 @@ class UniversalVideoDownloader:
         )
         if not should_update:
             self.update_in_progress = False
-            self.status_label.config(text="Ready", foreground=self.colors["accent"])
+            if show_current_status:
+                self.status_label.config(text="Ready", foreground=self.colors["accent"])
             return
 
-        self.status_label.config(text="Downloading update...", foreground=self.colors["accent"])
+        if show_current_status:
+            self.status_label.config(text="Downloading update...", foreground=self.colors["accent"])
         threading.Thread(
             target=self._download_and_launch_update,
             args=(result,),
@@ -699,7 +719,7 @@ class UniversalVideoDownloader:
                 downloaded_path = download_asset(
                     asset_url,
                     asset_name,
-                    progress_callback=lambda done, total: self.root.after(
+                    progress_callback=lambda done, total: self._safe_after(
                         0, self._on_update_download_progress, done, total
                     ),
                 )
@@ -708,39 +728,168 @@ class UniversalVideoDownloader:
 
             if os.name == "nt" and downloaded_path:
                 launch_windows_installer(downloaded_path)
-                self.root.after(
+                self._safe_after(
                     0,
                     lambda: messagebox.showinfo(
                         "Update",
                         "Installer started. The app will close so the update can continue.",
                     ),
                 )
-                self.root.after(500, self.root.quit)
+                self._safe_after(500, lambda: self._shutdown_app(force=True))
             else:
                 open_release_page(release_url or asset_url)
-                self.root.after(
+                self._safe_after(
                     0,
                     lambda: messagebox.showinfo(
                         "Update",
                         "Update package is ready. Opened the release page for installation instructions.",
                     ),
                 )
-                self.root.after(0, lambda: self.status_label.config(text="Ready", foreground=self.colors["accent"]))
+                self._safe_after(0, lambda: self.status_label.config(text="Ready", foreground=self.colors["accent"]))
         except Exception as exc:
-            self.root.after(
+            self._safe_after(
                 0,
                 lambda: messagebox.showerror(
                     "Update",
                     self._friendly_error_message(str(exc)),
                 ),
             )
-            self.root.after(0, lambda: self.status_label.config(text="Ready", foreground=self.colors["accent"]))
+            self._safe_after(0, lambda: self.status_label.config(text="Ready", foreground=self.colors["accent"]))
         finally:
             self.update_in_progress = False
 
     def _apply_entry_cursor_theme(self, entry_widget):
         try:
             entry_widget.tk.call(entry_widget._w, "configure", "-insertbackground", self.colors["text"])
+        except tk.TclError:
+            pass
+
+    def _setup_linux_paste_support(self, entry_widget):
+        """Enable robust paste support for Linux clipboard behavior."""
+        if not sys.platform.startswith("linux"):
+            return
+
+        def paste_from_clipboard(_event=None):
+            text = self._get_clipboard_text()
+            if not text:
+                return "break"
+            try:
+                entry_widget.focus_set()
+                if entry_widget.selection_present():
+                    entry_widget.delete("sel.first", "sel.last")
+                entry_widget.insert(tk.INSERT, text)
+            except tk.TclError:
+                pass
+            return "break"
+
+        # Support common Linux paste shortcuts and mouse paste behavior.
+        for sequence in (
+            "<Control-v>",
+            "<Control-V>",
+            "<Control-KeyPress-v>",
+            "<Control-KeyPress-V>",
+            "<Shift-Insert>",
+            "<<Paste>>",
+            "<Button-2>",
+        ):
+            entry_widget.bind(sequence, paste_from_clipboard)
+
+        try:
+            entry_widget.bind("<Button-3>", lambda e: self._show_paste_menu(entry_widget, e))
+        except Exception:
+            pass
+
+    def _get_clipboard_text(self):
+        # Linux desktops may expose copied text as CLIPBOARD or PRIMARY.
+        for selection in ("CLIPBOARD", "PRIMARY"):
+            try:
+                text = self.root.selection_get(selection=selection)
+            except tk.TclError:
+                continue
+            if text:
+                return text
+        try:
+            return self.root.clipboard_get()
+        except tk.TclError:
+            pass
+        return ""
+
+    def _show_paste_menu(self, entry_widget, event):
+        """Show right-click paste menu on Linux."""
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(
+                label="Paste",
+                command=lambda: entry_widget.insert(tk.INSERT, self._get_clipboard_text()),
+            )
+            menu.tk_popup(event.x_root, event.y_root)
+        except tk.TclError:
+            pass
+
+    def _safe_after(self, delay, callback, *args):
+        if self._shutdown_in_progress:
+            return None
+        try:
+            if self.root.winfo_exists():
+                return self.root.after(delay, callback, *args)
+        except tk.TclError:
+            pass
+        return None
+
+    def request_close(self):
+        if self._shutdown_in_progress:
+            return
+
+        if self.is_downloading:
+            should_close = messagebox.askyesno(
+                "Exit UVids Downloader",
+                "A download is still running.\n\n"
+                "Closing now will cancel the active download and exit the app.\n\n"
+                "Do you want to continue?",
+            )
+            if not should_close:
+                return
+            self.cancel_entire = True
+            self.skip_current = True
+
+        self._shutdown_app(force=True)
+
+    def _close_child_windows(self):
+        for child in list(self.root.winfo_children()):
+            if not isinstance(child, tk.Toplevel):
+                continue
+            try:
+                if child.grab_current() is child:
+                    child.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+
+    def _shutdown_app(self, force=False):
+        if self._shutdown_in_progress:
+            return
+
+        self._shutdown_in_progress = True
+
+        if self.url_timer is not None:
+            try:
+                self.root.after_cancel(self.url_timer)
+            except tk.TclError:
+                pass
+            self.url_timer = None
+
+        if force:
+            self.cancel_entire = True
+            self.skip_current = True
+
+        self._close_child_windows()
+
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
         except tk.TclError:
             pass
 
@@ -1002,6 +1151,8 @@ class UniversalVideoDownloader:
 
     def setup_url_trace(self):
         def on_url_change(*_args):
+            if self._shutdown_in_progress:
+                return
             if self.url_timer:
                 self.root.after_cancel(self.url_timer)
             self.url_timer = self.root.after(800, self.fetch_info_async)
@@ -1031,7 +1182,7 @@ class UniversalVideoDownloader:
             self.current_info = info
             is_playlist = "entries" in info and info["entries"] is not None
             self.playlist_detected = is_playlist
-            self.root.after(0, self._update_preview, info, is_playlist)
+            self._safe_after(0, self._update_preview, info, is_playlist)
         except Exception as exc:
             error_msg = self._friendly_error_message(str(exc))
             if "Private video" in error_msg or "Sign in" in error_msg:
@@ -1039,7 +1190,7 @@ class UniversalVideoDownloader:
                     "This video is private. You need to log in.\n\n"
                     "Workaround:\n1. Use cookies from your browser\n2. Or try a different video"
                 )
-            self.root.after(0, self._show_error, error_msg)
+            self._safe_after(0, self._show_error, error_msg)
 
     def _update_preview(self, info, is_playlist):
         self.metadata_text.delete(1.0, tk.END)
@@ -1259,25 +1410,23 @@ class UniversalVideoDownloader:
 
                     if total != self.current_video_size:
                         self.current_video_size = total
-                        self.root.after(
-                            0, lambda: self.size_label.config(text=f"Size: {format_size(total)}")
-                        )
+                        self._safe_after(0, lambda: self.size_label.config(text=f"Size: {format_size(total)}"))
 
-                    self.root.after(0, self.update_progress, percent, "Downloading...", time_left_str)
+                    self._safe_after(0, self.update_progress, percent, "Downloading...", time_left_str)
                 else:
-                    self.root.after(0, self.update_progress, self.last_percent, "Downloading...", "??:??")
+                    self._safe_after(0, self.update_progress, self.last_percent, "Downloading...", "??:??")
             except Exception:
-                self.root.after(0, self.update_progress, self.last_percent, "Downloading...", "??:??")
+                self._safe_after(0, self.update_progress, self.last_percent, "Downloading...", "??:??")
 
         elif data["status"] == "finished":
             self.last_percent = 100
             self.completed_videos += 1
             self.video_left_count = max(0, self.total_videos - self.completed_videos)
-            self.root.after(0, self.update_videos_left)
-            self.root.after(0, self.update_progress, 100, "Processing...", "Finalizing")
+            self._safe_after(0, self.update_videos_left)
+            self._safe_after(0, self.update_progress, 100, "Processing...", "Finalizing")
 
         elif data["status"] == "error":
-            self.root.after(0, self.update_progress, 0, "Error occurred", "N/A")
+            self._safe_after(0, self.update_progress, 0, "Error occurred", "N/A")
 
     def update_videos_left(self):
         self.videos_left_label.config(text=f"Videos left: {self.video_left_count}")
@@ -1416,16 +1565,16 @@ class UniversalVideoDownloader:
             )
 
             if not self.cancel_entire and not self.skip_current:
-                self.root.after(0, lambda: self.finish_download(True))
+                self._safe_after(0, lambda: self.finish_download(True))
             else:
-                self.root.after(0, lambda: self.finish_download(False, "Cancelled"))
+                self._safe_after(0, lambda: self.finish_download(False, "Cancelled"))
         except Exception as exc:
             err = str(exc)
             if "Skip current video" in err:
-                self.root.after(0, lambda: self.finish_download(False, "Skipped current video"))
+                self._safe_after(0, lambda: self.finish_download(False, "Skipped current video"))
                 return
             if "cancelled" in err.lower() or self.cancel_entire:
-                self.root.after(0, lambda: self.finish_download(False, "Cancelled"))
+                self._safe_after(0, lambda: self.finish_download(False, "Cancelled"))
                 return
             if "Unsupported URL" in err:
                 err = "URL not supported. Try a direct video page link."
@@ -1435,7 +1584,7 @@ class UniversalVideoDownloader:
                 err = "This video is private. Use cookies to authenticate (see docs)."
             else:
                 err = self._friendly_error_message(err)
-            self.root.after(0, lambda: self.finish_download(False, err))
+            self._safe_after(0, lambda: self.finish_download(False, err))
 
     def run(self):
         self.root.mainloop()
